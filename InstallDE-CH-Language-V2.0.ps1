@@ -1,192 +1,115 @@
-# ------------------------------------------------------------------------------------------------------------ #
-# Author(s)    : Peter Klapwijk - www.inthecloud247.com                                                        #
-#                (Part of the script is from script from www.oliverkieselbach.com)                             #
-# Version      : 1.1 (hardened for unattended Intune deployment)                                               #
-#                                                                                                              #
-# Description  : Install an additional language pack including FODs.                                           #
-#                Changes language for new users, welcome screen etc.                                           #
-#                Runs fully unattended (SYSTEM context), also when no user is logged on.                       #
-#                Supported on Windows 11 22H2 and later.                                                       #
-# ------------------------------------------------------------------------------------------------------------ #
+#Original script from https://www.inthecloud247.com/install-an-additional-language-pack-on-windows-11-during-autopilot-enrollment/
+#This script need to run as System Context and as 64bit PowerShell
 
-# Microsoft Intune Management Extension might start a 32-bit PowerShell instance. If so, restart as 64-bit PowerShell
-If ($ENV:PROCESSOR_ARCHITEW6432 -eq "AMD64") {
-    Try {
-        &"$ENV:WINDIR\SysNative\WindowsPowershell\v1.0\PowerShell.exe" -File $PSCOMMANDPATH
-    }
-    Catch {
-        Throw "Failed to start $PSCOMMANDPATH"
-    }
-    Exit
-}
+<#
+.SYNOPSIS
+  Script to install langauge pack and change MUI langauge
 
-# Set variables:
-# Company name
-$CompanyName = "VISI"
-# The language we want as new default.
-$language = "de-CH"
-# Geographical ID we want to set.
-$geoId = "223"  # Swiss
+.DESCRIPTION
+    Script to install langauge package and set default language
 
-# Start Transcript
-Start-Transcript -Path "$env:ProgramData\Microsoft\IntuneManagementExtension\Logs\$($(Split-Path $PSCommandPath -Leaf).ToLower().Replace(".ps1",".log"))" | Out-Null
+.EXAMPLE
+    powershell.exe -ExecutionPolicy Bypass -file Invoke-ChangeDefaultLanguage.ps1 
 
-# custom folder for temp scripts
-"...creating custom temp script folder"
-$scriptFolderPath = "$env:SystemDrive\ProgramData\$CompanyName\CustomTempScripts"
-New-Item -ItemType Directory -Force -Path $scriptFolderPath | Out-Null
-"`n"
+.NOTES
+    Credit: #Original script from https://www.inthecloud247.com/install-an-additional-language-pack-on-windows-11-during-autopilot-enrollment/
+    Version:        1.0.0
+    Author:         Sandy Zeng
+    Creation Date:  09.06.2024
+    Updated:    
+    Version history:
+        1.0.0 - (09.06.2024) Script released
+#>
 
-$userConfigScriptPath = $(Join-Path -Path $scriptFolderPath -ChildPath "UserConfig.ps1")
-"...creating userconfig script"
-$userConfigScript = @"
-`$language = "$language"
-
-Start-Transcript -Path "`$env:TEMP\LXP-UserSession-Config-`$language.log" | Out-Null
-
-`$geoId = $geoId
-
-# important for regional change like date and time...
-"Set-WinUILanguageOverride = `$language"
-Set-WinUILanguageOverride -Language `$language
-
-"Set-WinUserLanguageList = `$language"
-
-`$OldList = Get-WinUserLanguageList
-`$UserLanguageList = New-WinUserLanguageList -Language `$language
-`$UserLanguageList += `$OldList | where { `$_.LanguageTag -ne `$language }
-"Setting new user language list:"
-`$UserLanguageList | select LanguageTag
-""
-"Set-WinUserLanguageList -LanguageList ..."
-Set-WinUserLanguageList -LanguageList `$UserLanguageList -Force
-
-"Set-Culture = `$language"
-Set-Culture -CultureInfo `$language
-
-"Set-WinHomeLocation = `$geoId"
-Set-WinHomeLocation -GeoId `$geoId
-
-Stop-Transcript -Verbose
-"@
-
-# Install an additional language pack including FODs (with one retry for transient download issues)
-"Installing language pack $language"
-$languageInstalled = $false
-$attempt = 0
-while (-not $languageInstalled -and $attempt -lt 2) {
-    $attempt++
+function Write-LogEntry {
+    param (
+        [parameter(Mandatory = $true, HelpMessage = "Value added to the log file.")]
+        [ValidateNotNullOrEmpty()]
+        [string]$Value,
+        [parameter(Mandatory = $true, HelpMessage = "Severity for the log entry. 1 for Informational, 2 for Warning and 3 for Error.")]
+        [ValidateNotNullOrEmpty()]
+        [ValidateSet("1", "2", "3")]
+        [string]$Severity,
+        [parameter(Mandatory = $false, HelpMessage = "Name of the log file that the entry will written to.")]
+        [ValidateNotNullOrEmpty()]
+        [string]$FileName = $LogFileName
+    )
+    # Determine log file location
+    $LogFilePath = Join-Path -Path $env:ProgramData -ChildPath $("Microsoft\IntuneManagementExtension\Logs\$FileName")
+	
+    # Construct time stamp for log entry
+    $Time = -join @((Get-Date -Format "HH:mm:ss.fff"), " ", (Get-WmiObject -Class Win32_TimeZone | Select-Object -ExpandProperty Bias))
+	
+    # Construct date for log entry
+    $Date = (Get-Date -Format "MM-dd-yyyy")
+	
+    # Construct context for log entry
+    $Context = $([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)
+	
+    # Construct final log entry
+    $LogText = "<![LOG[$($Value)]LOG]!><time=""$($Time)"" date=""$($Date)"" component=""$($LogFileName)"" context=""$($Context)"" type=""$($Severity)"" thread=""$($PID)"" file="""">"
+	
+    # Add value to log file
     try {
-        Install-Language $language -CopyToSettings -ErrorAction Stop
-        $languageInstalled = $true
+        Out-File -InputObject $LogText -Append -NoClobber -Encoding Default -FilePath $LogFilePath -ErrorAction Stop
+        if ($Severity -eq 1) {
+            Write-Verbose -Message $Value
+        }
+        elseif ($Severity -eq 3) {
+            Write-Warning -Message $Value
+        }
     }
-    catch {
-        "Attempt $attempt to install language failed: $($_.Exception.Message)"
-        if ($attempt -lt 2) { Start-Sleep -Seconds 20 }
+    catch [System.Exception] {
+        Write-Warning -Message "Unable to append log entry to $LogFileName file. Error message at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"
     }
 }
 
-# Check status of the installed language pack
-"Checking installed language pack status"
-$installedLanguage = (Get-InstalledLanguage).LanguageId
-if ($installedLanguage -like $language) {
-    Write-Host "Language $language installed"
-}
-else {
-    Write-Host "Failure! Language $language NOT installed"
-    Stop-Transcript
-    Exit 1
-}
+# The language we want as new default. Language tag can be found here: https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/available-language-packs-for-windows?view=windows-11#language-packs
+$LPlanguage = "de-CH"
 
-# Set System Preferred UI Language
-"Set SystemPreferredUILanguage"
-Set-SystemPreferredUILanguage $language
+#Region Initialisations
+$LogFileName = "Invoke-ChangeDefaultLanguage-$LPlanguage.log"
 
-# Check status of the System Preferred Language
-$SystemPreferredUILanguage = Get-SystemPreferredUILanguage
-if ($SystemPreferredUILanguage -like $language) {
-    Write-Host "System Preferred UI Language set to $language. OK"
+# As In some countries the input locale might differ from the installed language pack language, we use a separate input local variable.
+# A list of input locales can be found here: https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/default-input-locales-for-windows-language-packs?view=windows-11#input-locales
+$InputlocaleRegion = "de-CH"
+
+# Geographical ID we want to set. GeoID can be found here: https://learn.microsoft.com/en-us/windows/win32/intl/table-of-geographical-locations
+$geoId = "223"
+
+#Install language pack and change the language of the OS on different places
+#Install an additional language pack including FODs. With CopyToSettings (optional), this will change language for non-Unicode program. 
+Write-LogEntry -Value "Installing language $LPlanguage" -Severity 1
+try {
+    Install-Language -Language $LPlanguage -CopyToSettings -ErrorAction Stop
+    Write-LogEntry -Value "$LPlanguage is installed" -Severity 1
 }
-else {
-    Write-Host "Failure! System Preferred UI Language NOT set to $language. System Preferred UI Language is $SystemPreferredUILanguage"
-    Stop-Transcript
-    Exit 1
+catch [System.Exception] {
+    Write-LogEntry -Value "$LPlanguage install failed with error: $($_.Exception.Message)" -Severity 3
+    exit 1
 }
 
-# Configure new language defaults under current user (SYSTEM account) so they can be copied to the system
-"Set WinUILanguageOverride"
-Set-WinUILanguageOverride -Language $language
+# Configure new language defaults under current user (system) after which it can be copied to system
+Write-LogEntry -Value "Set Win UI Language Override for regional changes $InputlocaleRegion " -Severity 1
+Set-WinUILanguageOverride -Language $InputlocaleRegion
 
-"Set WinUserLanguageList"
+# adding the input locale language to the preferred language list, and make it as the first of the list. 
+Write-LogEntry -Value "Set Win User Language List" -Severity 1
 $OldList = Get-WinUserLanguageList
-$UserLanguageList = New-WinUserLanguageList -Language $language
-$UserLanguageList += $OldList | where { $_.LanguageTag -ne $language }
-$UserLanguageList | select LanguageTag
+$UserLanguageList = New-WinUserLanguageList -Language $InputlocaleRegion
+$UserLanguageList += $OldList
 Set-WinUserLanguageList -LanguageList $UserLanguageList -Force
 
-"Set culture"
-Set-Culture -CultureInfo $language
-
-"Set WinHomeLocation"
+# Set Win Home Location, sets the home location setting for the current user. This is for Region location 
+Write-LogEntry -Value "Set Region location $geoId" -Severity 1
 Set-WinHomeLocation -GeoId $geoId
 
-# Copy User International Settings from current user (SYSTEM) to System, incl. Welcome screen and new user
-"Copy UserInternationalSettingsToSystem"
-try {
-    Copy-UserInternationalSettingsToSystem -WelcomeScreen $True -NewUser $True -ErrorAction Stop
-}
-catch {
-    "Copy-UserInternationalSettingsToSystem failed (non-fatal): $($_.Exception.Message)"
-}
+# Set Culture, sets the user culture for the current user account. This is for Region format
+Write-LogEntry -Value "Set Region format $InputlocaleRegion" -Severity 1
+Set-Culture -CultureInfo $InputlocaleRegion
 
-# Switch the language for the CURRENT user session, but only if a user is logged on.
-# When running in device context (e.g. Autopilot ESP without user), this block is skipped.
-$loggedOnUser = (Get-CimInstance -ClassName Win32_ComputerSystem).UserName
-if ([string]::IsNullOrWhiteSpace($loggedOnUser)) {
-    "No interactive user logged on. Skipping current-user session config."
-    "New user, Welcome screen and system defaults are already configured via Copy-UserInternationalSettingsToSystem."
-}
-else {
-    "Interactive user detected: $loggedOnUser. Triggering language change for current user session."
-    Out-File -FilePath $userConfigScriptPath -InputObject $userConfigScript -Encoding ascii
+# Copy User International Settings from current user to System, including Welcome screen and new user
+Write-LogEntry -Value "Copy User International Settings from current user to System" -Severity 1
+Copy-UserInternationalSettingsToSystem -WelcomeScreen $True -NewUser $True
 
-    $taskName = "LXP-UserSession-Config-$language"
-    # Run PowerShell directly (no wscript/VBS) to avoid AppLocker/ASR blocking and window flashing
-    $action    = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$userConfigScriptPath`""
-    $trigger   = New-ScheduledTaskTrigger -AtLogOn
-    $principal = New-ScheduledTaskPrincipal -UserId $loggedOnUser -LogonType Interactive
-    $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    $task      = New-ScheduledTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings
-    Register-ScheduledTask $taskName -InputObject $task -Force | Out-Null
-    Start-ScheduledTask -TaskName $taskName
-
-    # Wait for the task to finish instead of a fixed sleep
-    $maxWaitSeconds = 180
-    $waited = 0
-    Start-Sleep -Seconds 3
-    while (((Get-ScheduledTask -TaskName $taskName).State -eq 'Running') -and ($waited -lt $maxWaitSeconds)) {
-        Start-Sleep -Seconds 5
-        $waited += 5
-    }
-    $lastResult = (Get-ScheduledTaskInfo -TaskName $taskName).LastTaskResult
-    "Current-user task finished with LastTaskResult $lastResult after about $waited seconds"
-
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-}
-
-# trigger 'LanguageComponentsInstaller\ReconcileLanguageResources' otherwise 'Windows Settings' need a long time to change finally
-"Trigger ScheduledTask = LanguageComponentsInstaller\ReconcileLanguageResources"
-Start-ScheduledTask -TaskName "\Microsoft\Windows\LanguageComponentsInstaller\ReconcileLanguageResources"
-
-Start-Sleep 10
-
-# trigger store updates, there might be new app versions due to the language change
-"Trigger MS Store updates for app updates"
-Get-CimInstance -Namespace "root\cimv2\mdm\dmmap" -ClassName "MDM_EnterpriseModernAppManagement_AppManagement01" | Invoke-CimMethod -MethodName "UpdateScanMethod"
-
-# Add registry key for Intune detection
-"Add registry key for Intune detection"
-REG add "HKLM\Software\$CompanyName\LanguageXPWIN11\v1.0" /v "SetLanguage-$language" /t REG_DWORD /d 1 /f
-
-Stop-Transcript
-Exit 0
+Exit 3010
