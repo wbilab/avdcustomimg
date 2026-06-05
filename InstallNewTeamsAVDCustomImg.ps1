@@ -202,6 +202,7 @@ try {
 # Disable new Teams auto update
 Write-Host "Disabling new Teams auto update" -ForegroundColor Cyan
 try {
+    New-Item -Path "HKLM:\SOFTWARE\Microsoft\Teams" -Force
     New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Teams" -Name disableAutoUpdate -PropertyType DWORD -Value 1 -Force
     Write-Host "Disabled new Teams auto update" -ForegroundColor Green
 } catch {
